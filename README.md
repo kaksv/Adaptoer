@@ -2,7 +2,7 @@
 
 ### **Privacy-Preserving Price Discovery with Fully Homomorphic Encryption**
 
-> A Uniswap v4 hook that enables sealed bid auctions within liquidity pools, allowing traders to submit encrypted bids without revealing their intent, enabling natural price discovery through FHE-encrypted bid matching.
+> A Uniswap v4 hook that enables sealed bid auctions for uniswap X Dutch auctions within liquidity pools, allowing traders to submit encrypted bids without revealing their intent, enabling natural price discovery through FHE-encrypted bid matching.
 
 ## Overview
 
