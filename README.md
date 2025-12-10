@@ -1,4 +1,4 @@
-# Sealed Bid Auction Hook for Uniswap v4 🔒🦄
+# Sealed Bid Auction Hook for Uniswap X 🔒🦄
 
 ### **Privacy-Preserving Price Discovery with Fully Homomorphic Encryption**
 
