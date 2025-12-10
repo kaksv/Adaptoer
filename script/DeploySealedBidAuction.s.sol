@@ -11,6 +11,7 @@ import {PoolModifyLiquidityTest} from "@uniswap/v4-core/src/test/PoolModifyLiqui
 import {PoolSwapTest} from "@uniswap/v4-core/src/test/PoolSwapTest.sol";
 import {PoolDonateTest} from "@uniswap/v4-core/src/test/PoolDonateTest.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 import {Constants} from "@uniswap/v4-core/src/../test/utils/Constants.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
@@ -27,27 +28,102 @@ import {IPositionDescriptor} from "v4-periphery/src/interfaces/IPositionDescript
 import {IWETH9} from "v4-periphery/src/interfaces/external/IWETH9.sol";
 import {SwapParams, ModifyLiquidityParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 
-/// @notice Forge script for deploying Sealed Bid Auction Hook to anvil
+/// @notice Comprehensive deployment script for Sealed Bid Auction Hook
+/// @dev Supports deployment to Anvil (local), testnets, and mainnet
+/// 
+/// Usage:
+///   forge script script/DeploySealedBidAuction.s.sol:SealedBidAuctionScript --rpc-url <RPC_URL> --broadcast
+///
+/// Environment Variables (optional):
+///   DEPLOY_POOL_MANAGER=true    - Deploy new PoolManager (default: true)
+///   DEPLOY_POSM=true            - Deploy PositionManager (default: true)
+///   DEPLOY_ROUTERS=true         - Deploy test routers (default: true)
+///   CREATE_POOL=true            - Create test pool (default: true)
+///   ADD_LIQUIDITY=true          - Add liquidity to pool (default: true)
+///   START_AUCTION=true          - Start auction after setup (default: true)
+///   POOL_MANAGER_ADDRESS=0x...  - Use existing PoolManager (if DEPLOY_POOL_MANAGER=false)
 contract SealedBidAuctionScript is Script, DeployPermit2 {
     using EasyPosm for IPositionManager;
+    using PoolIdLibrary for PoolKey;
 
     address constant CREATE2_DEPLOYER = address(0x4e59b44847b379578588920cA78FbF26c0B4956C);
-    IPoolManager manager;
-    IPositionManager posm;
-    PoolModifyLiquidityTest lpRouter;
-    PoolSwapTest swapRouter;
+    
+    // Deployment addresses
+    IPoolManager public manager;
+    SealedBidAuctionHook public hook;
+    IPositionManager public posm;
+    PoolModifyLiquidityTest public lpRouter;
+    PoolSwapTest public swapRouter;
+    
+    // Configuration
+    bool public deployPoolManager = true;
+    bool public deployPosm = true;
+    bool public deployRouters = true;
+    bool public createPool = true;
+    bool public addLiquidity = true;
+    bool public startAuction = true;
 
-    function setUp() public {}
+    function setUp() public {
+        // Read configuration from environment or use defaults
+        deployPoolManager = vm.envOr("DEPLOY_POOL_MANAGER", true);
+        deployPosm = vm.envOr("DEPLOY_POSM", true);
+        deployRouters = vm.envOr("DEPLOY_ROUTERS", true);
+        createPool = vm.envOr("CREATE_POOL", true);
+        addLiquidity = vm.envOr("ADD_LIQUIDITY", true);
+        startAuction = vm.envOr("START_AUCTION", true);
+    }
 
+    /// @notice Main deployment function
+    /// @dev Deploys hook, pool manager, and optionally sets up a test pool
     function run() public {
-        vm.broadcast();
-        manager = deployPoolManager();
+        console.log("=== Sealed Bid Auction Hook Deployment ===");
+        console.log("Deployer:", msg.sender);
+        console.log("Chain ID:", block.chainid);
+        
+        // Step 1: Deploy Pool Manager (if needed)
+        if (deployPoolManager) {
+            deployPoolManagerContract();
+        } else {
+            // Use existing pool manager from environment
+            manager = IPoolManager(vm.envAddress("POOL_MANAGER_ADDRESS"));
+            console.log("Using existing PoolManager at:", address(manager));
+        }
 
+        // Step 2: Deploy Hook
+        deployHook();
+
+        // Step 3: Deploy Position Manager and Routers (if needed)
+        if (deployPosm || deployRouters) {
+            deploySupportingContracts();
+        }
+
+        // Step 4: Create pool and setup (optional, for testing)
+        if (createPool) {
+            setupTestPool();
+        }
+
+        // Print summary
+        printDeploymentSummary();
+    }
+
+    /// @notice Deploy the Pool Manager contract
+    function deployPoolManagerContract() internal {
+        console.log("\n--- Deploying Pool Manager ---");
+        vm.broadcast();
+        manager = IPoolManager(address(new PoolManager(address(0))));
+        console.log("PoolManager deployed at:", address(manager));
+    }
+
+    /// @notice Deploy the Sealed Bid Auction Hook
+    function deployHook() internal {
+        console.log("\n--- Deploying Sealed Bid Auction Hook ---");
+        
         // Hook contracts must have specific flags encoded in the address
         uint160 permissions = uint160(
             Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG
         );
 
+        console.log("Mining salt for hook address...");
         // Mine a salt that will produce a hook address with the correct permissions
         (address hookAddress, bytes32 salt) = HookMiner.find(
             CREATE2_DEPLOYER,
@@ -56,36 +132,116 @@ contract SealedBidAuctionScript is Script, DeployPermit2 {
             abi.encode(address(manager))
         );
 
-        console.log("Hook address:", hookAddress);
+        console.log("Expected hook address:", hookAddress);
         console.log("Salt:", vm.toString(salt));
 
-        // ----------------------------- //
-        // Deploy the hook using CREATE2 //
-        // ----------------------------- //
+        // Deploy the hook using CREATE2
         vm.broadcast();
-        SealedBidAuctionHook hook = new SealedBidAuctionHook{salt: salt}(manager);
-        require(address(hook) == hookAddress, "SealedBidAuctionScript: hook address mismatch");
-
+        hook = new SealedBidAuctionHook{salt: salt}(manager);
+        
+        require(address(hook) == hookAddress, "Hook address mismatch");
         console.log("SealedBidAuctionHook deployed at:", address(hook));
+        
+        // Verify hook permissions
+        Hooks.Permissions memory perms = hook.getHookPermissions();
+        require(perms.beforeSwap == true, "beforeSwap not enabled");
+        require(perms.afterSwap == true, "afterSwap not enabled");
+        console.log("Hook permissions verified");
+    }
 
-        // Additional helpers for interacting with the pool
-        vm.startBroadcast();
-        posm = deployPosm(manager);
-        (lpRouter, swapRouter,) = deployRouters(manager);
-        vm.stopBroadcast();
+    /// @notice Deploy supporting contracts (Position Manager and Routers)
+    function deploySupportingContracts() internal {
+        console.log("\n--- Deploying Supporting Contracts ---");
+        
+        if (deployPosm) {
+            vm.broadcast();
+            posm = deployPosmContract(manager);
+            console.log("PositionManager deployed at:", address(posm));
+        }
 
-        // Test the lifecycle (create pool, add liquidity, start auction)
-        vm.startBroadcast();
-        testLifecycle(address(hook));
-        vm.stopBroadcast();
+        if (deployRouters) {
+            vm.broadcast();
+            (lpRouter, swapRouter,) = deployRouters(manager);
+            console.log("Liquidity Router deployed at:", address(lpRouter));
+            console.log("Swap Router deployed at:", address(swapRouter));
+        }
+    }
+
+    /// @notice Setup a test pool with liquidity (for testing purposes)
+    function setupTestPool() internal {
+        console.log("\n--- Setting up Test Pool ---");
+        
+        (MockERC20 token0, MockERC20 token1) = deployTokens();
+        console.log("Token0 deployed at:", address(token0));
+        console.log("Token1 deployed at:", address(token1));
+
+        // Mint tokens to deployer
+        token0.mint(msg.sender, 100_000 ether);
+        token1.mint(msg.sender, 100_000 ether);
+        console.log("Tokens minted to deployer");
+
+        // Initialize the pool
+        int24 tickSpacing = 60;
+        PoolKey memory poolKey = PoolKey({
+            currency0: Currency.wrap(address(token0)),
+            currency1: Currency.wrap(address(token1)),
+            fee: 3000,
+            tickSpacing: tickSpacing,
+            hooks: IHooks(address(hook))
+        });
+        
+        vm.broadcast();
+        manager.initialize(poolKey, Constants.SQRT_PRICE_1_1);
+        console.log("Pool initialized");
+
+        // Approve tokens
+        if (deployRouters) {
+            token0.approve(address(lpRouter), type(uint256).max);
+            token1.approve(address(lpRouter), type(uint256).max);
+            token0.approve(address(swapRouter), type(uint256).max);
+            token1.approve(address(swapRouter), type(uint256).max);
+        }
+        
+        if (deployPosm) {
+            approvePosmCurrency(posm, Currency.wrap(address(token0)));
+            approvePosmCurrency(posm, Currency.wrap(address(token1)));
+        }
+
+        // Add liquidity if requested
+        if (addLiquidity) {
+            int24 tickLower = TickMath.minUsableTick(tickSpacing);
+            int24 tickUpper = TickMath.maxUsableTick(tickSpacing);
+            addLiquidityToPool(poolKey, tickLower, tickUpper);
+            console.log("Liquidity added to pool");
+        }
+
+        // Start auction if requested
+        if (startAuction) {
+            vm.broadcast();
+            PoolId poolId = poolKey.toId();
+            hook.startAuction(poolId);
+            console.log("Auction started for pool");
+        }
+    }
+
+    /// @notice Print deployment summary
+    function printDeploymentSummary() internal view {
+        console.log("\n=== Deployment Summary ===");
+        console.log("PoolManager:", address(manager));
+        console.log("SealedBidAuctionHook:", address(hook));
+        if (deployPosm) {
+            console.log("PositionManager:", address(posm));
+        }
+        if (deployRouters) {
+            console.log("LiquidityRouter:", address(lpRouter));
+            console.log("SwapRouter:", address(swapRouter));
+        }
+        console.log("========================\n");
     }
 
     // -----------------------------------------------------------
-    // Helpers
+    // Helper Functions
     // -----------------------------------------------------------
-    function deployPoolManager() internal returns (IPoolManager) {
-        return IPoolManager(address(new PoolManager(address(0))));
-    }
 
     function deployRouters(IPoolManager _manager)
         internal
@@ -96,8 +252,11 @@ contract SealedBidAuctionScript is Script, DeployPermit2 {
         _donateRouter = new PoolDonateTest(_manager);
     }
 
-    function deployPosm(IPoolManager poolManager) public returns (IPositionManager) {
-        anvilPermit2();
+    function deployPosmContract(IPoolManager poolManager) internal returns (IPositionManager) {
+        // Deploy Permit2 if on Anvil (local testing)
+        if (block.chainid == 31337 || block.chainid == 1) {
+            anvilPermit2();
+        }
         return IPositionManager(
             new PositionManager(poolManager, permit2, 300_000, IPositionDescriptor(address(0)), IWETH9(address(0)))
         );
@@ -123,46 +282,28 @@ contract SealedBidAuctionScript is Script, DeployPermit2 {
         }
     }
 
-    function testLifecycle(address hook) internal {
-        (MockERC20 token0, MockERC20 token1) = deployTokens();
-        token0.mint(msg.sender, 100_000 ether);
-        token1.mint(msg.sender, 100_000 ether);
+    function addLiquidityToPool(PoolKey memory poolKey, int24 tickLower, int24 tickUpper) internal {
+        // Add liquidity using router if available
+        if (address(lpRouter) != address(0)) {
+            ModifyLiquidityParams memory liqParams =
+                ModifyLiquidityParams(tickLower, tickUpper, 100 ether, 0);
+            lpRouter.modifyLiquidity(poolKey, liqParams, "");
+        }
 
-        // Initialize the pool
-        int24 tickSpacing = 60;
-        PoolKey memory poolKey =
-            PoolKey(Currency.wrap(address(token0)), Currency.wrap(address(token1)), 3000, tickSpacing, IHooks(hook));
-        manager.initialize(poolKey, Constants.SQRT_PRICE_1_1);
-
-        console.log("Pool initialized");
-
-        // Approve the tokens to the routers
-        token0.approve(address(lpRouter), type(uint256).max);
-        token1.approve(address(lpRouter), type(uint256).max);
-        token0.approve(address(swapRouter), type(uint256).max);
-        token1.approve(address(swapRouter), type(uint256).max);
-        approvePosmCurrency(posm, Currency.wrap(address(token0)));
-        approvePosmCurrency(posm, Currency.wrap(address(token1)));
-
-        // Add full range liquidity to the pool
-        int24 tickLower = TickMath.minUsableTick(tickSpacing);
-        int24 tickUpper = TickMath.maxUsableTick(tickSpacing);
-        _exampleAddLiquidity(poolKey, tickLower, tickUpper);
-
-        console.log("Liquidity added");
-
-        // Start auction
-        SealedBidAuctionHook(payable(hook)).startAuction(poolKey.toId());
-        console.log("Auction started");
-    }
-
-    function _exampleAddLiquidity(PoolKey memory poolKey, int24 tickLower, int24 tickUpper) internal {
-        // Provisions full-range liquidity
-        ModifyLiquidityParams memory liqParams =
-            ModifyLiquidityParams(tickLower, tickUpper, 100 ether, 0);
-        lpRouter.modifyLiquidity(poolKey, liqParams, "");
-
-        posm.mint(poolKey, tickLower, tickUpper, 100e18, 10_000e18, 10_000e18, msg.sender, block.timestamp + 300, "");
+        // Add liquidity using Position Manager if available
+        if (address(posm) != address(0)) {
+            posm.mint(
+                poolKey,
+                tickLower,
+                tickUpper,
+                100e18,
+                10_000e18,
+                10_000e18,
+                msg.sender,
+                block.timestamp + 300,
+                ""
+            );
+        }
     }
 }
 
