@@ -33,7 +33,7 @@ The Sealed Bid Auction Hook implements a novel auction mechanism for Uniswap v4 
 │  └──────────────┘  └──────────────┘  └──────────────┘ │
 │                                                          │
 │              ┌──────────────────────┐                  │
-│              │  Uniswap v4 Pool      │                  │
+│              │  Uniswap X Pool      │                  │
 │              │      Manager          │                  │
 │              └──────────────────────┘                  │
 └─────────────────────────────────────────────────────────┘
